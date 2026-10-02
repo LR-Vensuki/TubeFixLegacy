@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Shorts</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>autoCaps</key>
+			<string>none</string>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>ShortsQuery</string>
+			<key>label</key>
+			<string>Shorts Search</string>
+			<key>noAutoCorrect</key>
+			<true/>
+			<key>placeholder</key>
+			<string>#shorts</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>RYTDL fetches stream links without signing in. Video stats are the playback reports YouTube itself collects.</string>
+			<key>label</key>
+			<string>Network</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>UseRYTDL</string>
+			<key>label</key>
+			<string>Use RYTDL</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>EnableVideoStats</string>
+			<key>label</key>
+			<string>Send Video Stats</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>ShowLiveContent</string>
+			<key>label</key>
+			<string>Show Live Streams</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>Only if your server needs an API key.</string>
+			<key>label</key>
+			<string>TubeRepair Server</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>autoCaps</key>
+			<string>none</string>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>default</key>
+			<string></string>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>LegacyFallbackAPIKey</string>
+			<key>label</key>
+			<string>API Key</string>
+			<key>noAutoCorrect</key>
+			<true/>
+			<key>placeholder</key>
+			<string>not needed</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>autoCaps</key>
+			<string>none</string>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>default</key>
+			<string></string>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>LegacyFallbackAPIKeyHeader</string>
+			<key>label</key>
+			<string>Key Header</string>
+			<key>noAutoCorrect</key>
+			<true/>
+			<key>placeholder</key>
+			<string>X-TubeRepair-API-Key</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>Verbose logging writes what the tweak does to the system log (for bug reports).</string>
+			<key>label</key>
+			<string>Diagnostics</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>DebugLogging</string>
+			<key>label</key>
+			<string>Verbose Logging</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>YTRPDebugListController</string>
+			<key>isController</key>
+			<true/>
+			<key>label</key>
+			<string>Network Log</string>
+		</dict>
+	</array>
+	<key>title</key>
+	<string>Advanced</string>
+</dict>
+</plist>

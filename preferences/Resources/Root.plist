@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>default</key>
+			<string>auto</string>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>detail</key>
+			<string>PSListItemsController</string>
+			<key>key</key>
+			<string>Language</string>
+			<key>label</key>
+			<string>Language</string>
+			<key>validTitles</key>
+			<array>
+				<string>Automatic</string>
+				<string>English</string>
+				<string>Русский</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<string>auto</string>
+				<string>en</string>
+				<string>ru</string>
+			</array>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>Settings apply right away. Background playback and double-tap work while a video is open in the player.</string>
+			<key>label</key>
+			<string>YouTube (App Store)</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>ShortsEnabled</string>
+			<key>label</key>
+			<string>Shorts</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>ShortsPlayer</string>
+			<key>label</key>
+			<string>Shorts Player</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>BkgPlay</string>
+			<key>label</key>
+			<string>Background Playback</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>LockScreenControls</string>
+			<key>label</key>
+			<string>Lock Screen Controls</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>DoubleTapSeek</string>
+			<key>label</key>
+			<string>Double-Tap to Seek</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>default</key>
+			<integer>10</integer>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>detail</key>
+			<string>PSListItemsController</string>
+			<key>key</key>
+			<string>DoubleTapSeekSeconds</string>
+			<key>label</key>
+			<string>Seek Step</string>
+			<key>validTitles</key>
+			<array>
+				<string>5 seconds</string>
+				<string>10 seconds</string>
+				<string>15 seconds</string>
+				<string>20 seconds</string>
+				<string>30 seconds</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<integer>5</integer>
+				<integer>10</integer>
+				<integer>15</integer>
+				<integer>20</integer>
+				<integer>30</integer>
+			</array>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>PinchToFill</string>
+			<key>label</key>
+			<string>Pinch to Fill</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>TFLVideoListController</string>
+			<key>isController</key>
+			<true/>
+			<key>label</key>
+			<string>Video Quality</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>TFLCategoriesListController</string>
+			<key>isController</key>
+			<true/>
+			<key>label</key>
+			<string>Categories</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>The Classic YouTube app (and App Store versions other than 1.0-1.4 and 2.0-2.2) loads videos through a TubeRepair server.</string>
+			<key>label</key>
+			<string>YouTube Classic</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>LegacyFallbackEnabled</string>
+			<key>label</key>
+			<string>Enabled</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>autoCaps</key>
+			<string>none</string>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>LegacyFallbackServerURL</string>
+			<key>keyboard</key>
+			<string>URL</string>
+			<key>label</key>
+			<string>Server</string>
+			<key>noAutoCorrect</key>
+			<true/>
+			<key>placeholder</key>
+			<string>http://tuberepair.uptimetrackers.com</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>Closes both YouTube apps so they start fresh with the new settings.</string>
+		</dict>
+		<dict>
+			<key>action</key>
+			<string>killYouTube</string>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>Restart YouTube</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>TFLAdvancedListController</string>
+			<key>isController</key>
+			<true/>
+			<key>label</key>
+			<string>Advanced</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>TubeFixLegacy by LegacyReborn Project.
+Based on TubeReplacer by Preloading (GNU GPL v3). Icon from TubeRepair by bag.xml.</string>
+		</dict>
+	</array>
+	<key>title</key>
+	<string>TubeFixLegacy</string>
+</dict>
+</plist>

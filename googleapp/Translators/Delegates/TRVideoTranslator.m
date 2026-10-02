@@ -1,0 +1,1344 @@
+// TRVideoTranslator.m
+// TubeFixLegacy
+//
+// Video translator implementation
+// Handles both player responses and feed items
+
+#import "TRVideoTranslator.h"
+#include <Foundation/NSDictionary.h>
+#include <Foundation/NSObjCRuntime.h>
+#import "TRJSONUtils.h"
+#import <objc/runtime.h>
+#import "../appheaders.h"
+#import "../../base64/NSString+Base64.h"
+#import "../../base64/NSData+Base64.h"
+#import "../general.h"
+#import "common/SABR/TRSabrStream.h"
+#import "common/SABR/TRAdaptiveFormat.h"
+#import "../TRShorts.h"
+
+// "35,908 views", "112K views", "1.2M views" -> 35908 / 112000 / 1200000
+static uint64_t TRViewCountFromText(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) {
+        return 0;
+    }
+    NSString *cleaned = [[text stringByReplacingOccurrencesOfString:@"," withString:@""] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSScanner *scanner = [NSScanner scannerWithString:cleaned];
+    double number = 0;
+    if (![scanner scanDouble:&number]) {
+        return 0;
+    }
+    NSString *suffix = [[cleaned substringFromIndex:[scanner scanLocation]] uppercaseString];
+    if ([suffix hasPrefix:@"K"]) {
+        number *= 1000.0;
+    } else if ([suffix hasPrefix:@"M"]) {
+        number *= 1000000.0;
+    } else if ([suffix hasPrefix:@"B"]) {
+        number *= 1000000000.0;
+    }
+    return (uint64_t)llround(number);
+}
+
+// The old app's cells expect landscape thumbnails; Shorts only come with
+// portrait ones in the JSON, so use the standard i.ytimg.com set instead
+// (those exist for Shorts too).
+static NSDictionary *TRLandscapeThumbnailsForVideoId(NSString *videoId) {
+    NSMutableDictionary *thumbnails = [NSMutableDictionary dictionary];
+    NSArray *variants = @[
+        @[@"default", @120, @90],
+        @[@"mqdefault", @320, @180],
+        @[@"hqdefault", @480, @360],
+    ];
+    for (NSArray *variant in variants) {
+        NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://i.ytimg.com/vi/%@/%@.jpg", videoId, variant[0]]];
+        CGSize size = CGSizeMake([variant[1] floatValue], [variant[2] floatValue]);
+        [thumbnails setObject:url forKey:[NSValue valueWithBytes:&size objCType:@encode(CGSize)]];
+    }
+    return thumbnails;
+}
+
+@implementation TRVideoTranslator
+
+
+
+// this should really be in a seperate file but idc right now
++ (NSString *)uuid {
+    CFUUIDRef theUUID = CFUUIDCreate(NULL);
+    CFStringRef string = CFUUIDCreateString(NULL, theUUID);
+    CFRelease(theUUID);
+    return (__bridge NSString *)string;
+}
+
+#pragma mark - TRJSONTranslatorProtocol
+
++ (TREndpointType)supportedEndpoint {
+    return TREndpointTypeVideo;
+}
+
+- (BOOL)canTranslateJSON:(NSDictionary *)json {
+    if ([json objectForKey:@"videoDetails"]) {
+        return YES;
+    }
+    if (json[@"videoRenderer"] ||
+        json[@"compactVideoRenderer"] ||
+        json[@"gridVideoRenderer"] ||
+        json[@"playlistVideoRenderer"] ||
+        json[@"videoWithContextRenderer"] ||
+        json[@"lockupViewModel"] ||
+        json[@"shortsLockupViewModel"] ||
+        json[@"reelItemRenderer"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.shortsLockupViewModel"] ||
+        [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.reelItemRenderer"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.videoRenderer"] ||
+        [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.videoWithContextRenderer"] ||
+        [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.compactVideoRenderer"] ||
+        [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.lockupViewModel"]) {
+        return YES;
+    }
+    
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"itemSectionRenderer.contents[0].compactVideoRenderer"]) {
+        return YES;
+    }
+    return NO;
+}
+
+- (id)translateJSON:(NSDictionary *)json error:(NSError **)error {
+    if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRVideoTranslator" code:1 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid input"}];
+        }
+        return nil;
+    }
+    
+    if (json[@"videoDetails"]) {
+        return [self translatePlayerResponse:json error:error];
+    }
+    
+    return [self translateFeedItem:json withContext:nil error:error];
+}
+
+#pragma mark - Player Response (Full Video Details)
+
+- (id)translatePlayerResponse:(NSDictionary *)json error:(NSError **)error {
+    NSString *videoId = [TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.videoId"];
+    
+    if (!videoId) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRVideoTranslator" code:2 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Missing videoId"}];
+        }
+        return nil;
+    }
+    
+    NSArray *thumbArray = [TRJSONUtils arrayFromJSON:json keyPath:@"videoDetails.thumbnail.thumbnails"];
+    NSDictionary *thumbnails = [TRJSONUtils thumbnailsFromArray:thumbArray];
+    
+    NSMutableArray *ytStreams = [NSMutableArray array];
+    NSDictionary *preferences = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.legacyreborn.tubefixlegacy.plist"];
+
+
+    // formats
+    // 1 = 360p (fallback)
+    // 2 = TubeRepair/Custom
+    // 4 = HLS
+    // 5 = SABR
+
+    if (!([preferences[@"StreamType"] isEqualToString:@"custom"] || [preferences[@"StreamType"] isEqualToString:@"tuberepair"]) ) {
+        NSString *hlsStreamURL = [TRJSONUtils stringFromJSON:json keyPath:@"streamingData.hlsManifestUrl"];
+        if (hlsStreamURL && (preferences[@"AllowHLS"] == nil || [preferences[@"AllowHLS"] isEqual:@YES])) {
+            if ([preferences[@"StreamType"] isEqualToString:@"web"] || [preferences[@"StreamType"] isEqualToString:@"mweb"] || preferences[@"StreamType"] == nil) {
+                NSString *decipheredURL = [[TRPOTokenSolver sharedInstance] decipherUrl:hlsStreamURL signatureCipher:nil];
+                if (decipheredURL) {
+                    hlsStreamURL = decipheredURL;
+                }
+            }
+            
+            // this sux, it gives me fucking dubbed feeds, so i get to select the dubbed one out.
+            NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:hlsStreamURL]];
+            NSURLResponse *response = nil;
+            NSError *error = nil;
+
+            // This call blocks the thread
+            NSData *data = [NSURLConnection sendSynchronousRequest:request
+                                                returningResponse:&response
+                                                            error:&error];
+
+            if (data != nil && error == nil) {
+                // Handle success
+                // data:application/vnd.apple.mpegurl;base64,
+                NSString *result = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+
+                // Parse the M3U8 to remove bad audio :)
+                NSCharacterSet *separator = [NSCharacterSet newlineCharacterSet];
+                NSArray *elements = [result componentsSeparatedByCharactersInSet:separator];
+                NSMutableArray *newPlaylist = [NSMutableArray array];
+
+                // language stuff
+                NSString *language = nil;
+                if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"]) {
+                    language = [NSClassFromString(@"YTUtils") userLanguageCode];
+                } else {
+                    language = [NSClassFromString(@"YTDataUtils") userLanguageCode];
+                }
+                int idx = -1;
+                NSMutableArray *original_audio_ids = [NSMutableArray array];
+                bool has_removed_original = false;
+                for (NSString *element in elements) {
+                    idx++;
+                    if ([element hasPrefix:@"#EXT-X-MEDIA:"]) {
+                        // NSMutableDictionary *components = [NSMutableDictionary dictionary];
+                        // NSString *attributeList = [element substringFromIndex:13];
+                        
+                        // Parse attributes while respecting quoted values
+                        // NSMutableString *currentKey = [NSMutableString string];
+                        // NSMutableString *currentValue = [NSMutableString string];
+                        // BOOL inQuotes = NO;
+                        
+                        // for (NSInteger i = 0; i < [attributeList length]; i++) {
+                        //     unichar c = [attributeList characterAtIndex:i];
+                            
+                        //     if (c == '"') {
+                        //         inQuotes = !inQuotes;
+                        //         [currentValue appendFormat:@"%c", c];
+                        //     } else if (c == '=' && !inQuotes) {
+                        //         // Key-value separator
+                        //         [currentKey appendFormat:@"%c", c];
+                        //     } else if (c == ',' && !inQuotes) {
+                        //         // Attribute separator - save current pair
+                        //         if ([currentKey length] > 0) {
+                        //             NSArray *keyValue = [currentKey componentsSeparatedByString:@"="];
+                        //             if ([keyValue count] == 2) {
+                        //                 NSString *key = [keyValue[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        //                 NSString *value = [currentValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        //                 components[key] = value;
+                        //             }
+                        //         }
+                        //         [currentKey setString:@""];
+                        //         [currentValue setString:@""];
+                        //     } else {
+                        //         if ([currentKey rangeOfString:@"="].location != NSNotFound) {
+                        //             [currentValue appendFormat:@"%c", c];
+                        //         } else {
+                        //             [currentKey appendFormat:@"%c", c];
+                        //         }
+                        //     }
+                        // }
+                        
+                        // Don't forget the last pair
+                        // if ([currentKey length] > 0) {
+                        //     NSArray *keyValue = [currentKey componentsSeparatedByString:@"="];
+                        //     if ([keyValue count] == 2) {
+                        //         NSString *key = [keyValue[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        //         NSString *value = [currentValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        //         components[key] = value;
+                        //     }
+                        // }
+                        
+                        // Now that it's parsed, lets check and see if we should include it
+                        // if ([components[@"name"] hasSuffix:@" - dubbed-auto\""]) {
+                        //     continue;
+                        // }
+
+                        if ([element rangeOfString:@" - dubbed-auto\""].location != NSNotFound) {
+                            continue; // its really bad
+                        }
+
+                        
+                        if ([element rangeOfString:@" - dubbed\""].location != NSNotFound) {
+                            if (!PreferencesBoolValue(preferences, @"UseDubbedAudio", true)) {
+                                continue;
+                            }
+                            if ([element rangeOfString:[NSString stringWithFormat:@"LANGUAGE=\"%@\"", language]].location != NSNotFound) {
+                                has_removed_original = true;
+                                for (NSNumber *original_id in original_audio_ids) {
+                                    // original_audio_ids are ordered in reverse
+                                    [newPlaylist removeObjectAtIndex:[original_id intValue]];
+                                }
+                            } else { 
+                                continue;
+                            }
+                        }
+                        
+
+                        if ([element rangeOfString:@" - original\""].location != NSNotFound) {
+                            if (has_removed_original) {
+                                continue;
+                            }
+                            [original_audio_ids insertObject:@(idx) atIndex:0]; 
+                        }
+                        [newPlaylist addObject:element];
+                        
+
+                        // NSLog(@"components -> %@", components);
+                    } else {
+                        [newPlaylist addObject:element];
+                    }
+                }
+                // NSLog(@"newPlaylist -> %@", newPlaylist);
+                // store the M3U8 in a file
+
+                NSString *mediaPath = [NSString stringWithFormat:@"%@%@.m3u8", NSTemporaryDirectory(), [TRVideoTranslator uuid]];
+                NSLog(@"HLS Stream is at %@", mediaPath);
+
+                [[[newPlaylist valueForKey:@"description"] componentsJoinedByString:@"\n"] writeToFile:mediaPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                id stream = nil;
+                if ([version() isEqualToString:@"1.3.0"] || [version() isEqualToString:@"1.2.1"]) {
+                    stream = [NSClassFromString(@"YTStream") streamWithURL:[NSURL fileURLWithPath:mediaPath] format:4 encrypted:NO precached:NO]; // idk why lol
+                } else if (TRIsVersion2x()) {
+                    stream = [NSClassFromString(@"YTStream") streamWithURL:[NSURL fileURLWithPath:mediaPath] MIMEType:@"hls" format:4];
+                } else {
+                    stream = [NSClassFromString(@"YTStream") streamWithURL:[NSURL fileURLWithPath:mediaPath] format:4 encrypted:NO];
+                }
+
+                if (stream) {
+                    [ytStreams addObject:stream];
+                }
+                // NSLog(@"stream -> %@", streamURL);
+                // NSLog(@"%@", result); 
+            } else {
+                // Handle error
+                NSLog(@"Error fetching HLS Playlist: %@", error.localizedDescription);
+            }
+
+
+            // id stream = [NSClassFromString(@"YTStream") streamWithURL:[NSURL URLWithString:hlsStreamURL] format:3 encrypted:NO];
+            // if (stream) {
+            //     [ytStreams addObject:stream];
+            // }
+        }
+
+        NSString *sabrURL = [TRJSONUtils stringFromJSON:json keyPath:@"streamingData.serverAbrStreamingUrl"];
+        NSString *ustreamConfig = [TRJSONUtils stringFromJSON:json keyPath:@"playerConfig.mediaCommonConfig.mediaUstreamerRequestConfig.videoPlaybackUstreamerConfig"];
+
+        if (sabrURL && ustreamConfig && PreferencesBoolValue(preferences, @"AllowSABR", YES) && ([preferences[@"StreamType"] isEqualToString:@"web"] || [preferences[@"StreamType"] isEqualToString:@"mweb"] || preferences[@"StreamType"] == nil )) {
+            // handle SABR
+            NSMutableArray *adaptiveFormats = [[NSMutableArray alloc] init];
+            for (NSDictionary *f in [TRJSONUtils arrayFromJSON:json keyPath:@"streamingData.adaptiveFormats"]) {
+                if ([f[@"mimeType"] rangeOfString:@"codecs=\"vp9\""].location != NSNotFound)
+                    continue; // None of the devices can play VP9 (introduced in 2020)
+
+                if ([f[@"mimeType"] rangeOfString:@"codecs=\"av01"].location != NSNotFound)
+                    continue; // None of the devices can play AV1 (introduced in 2022)
+
+                if ([f[@"mimeType"] rangeOfString:@"codecs=\"opus"].location != NSNotFound)
+                    continue; // None of the devices can play Opus out of the box, it would need another library to deal with it
+
+                // NSString *urlString = f[@"url"];
+                // NSString *signatureCipher = f[@"signatureCipher"];
+                // if (urlString || signatureCipher) {
+                //     // todo: check if this is android before running this.
+                //     NSString *decipheredURL = [[TRPOTokenSolver sharedInstance] decipherUrl:urlString signatureCipher:signatureCipher];
+                //     if (decipheredURL) {
+                //         urlString = decipheredURL;
+                //     }
+                // }
+                TRAdaptiveFormat *format = [[TRAdaptiveFormat alloc] init];
+                format.itag = [f[@"itag"] unsignedIntValue];
+                format.url = f[@"url"]; // this does not include always include URL
+                format.xtags = f[@"xtags"];
+                format.mimeType = f[@"mimeType"];
+                format.bitrate = [f[@"bitrate"] unsignedIntValue];
+                format.width = [f[@"width"] intValue];
+                format.height = [f[@"height"] intValue];
+                format.lastModified = f[@"lastModified"];
+                if (f[@"contentLength"])
+                    format.contentLength = strtoul([f[@"contentLength"] UTF8String], NULL, 10);
+                format.quality = f[@"quality"];
+                format.qualityLabel = f[@"qualityLabel"];
+                format.fps = [f[@"fps"] intValue];
+                format.projectionType = f[@"projectionType"];
+                format.averageBitrate = [f[@"averageBitrate"] unsignedIntValue];
+                if (f[@"approxDurationMs"])
+                    format.approxDurationMs = strtoul([f[@"approxDurationMs"] UTF8String], NULL, 10);
+                format.qualityOrdinal = f[@"qualityOrdinal"];
+
+                // audio
+                format.loudnessDb = [f[@"loudnessDb"] doubleValue];
+                format.trackAbsoluteLoudnessLkfs = [f[@"trackAbsoluteLoudnessLkfs"] doubleValue];
+                format.audioSampleRate = [f[@"audioSampleRate"] intValue];
+                format.audioQuality = f[@"audioQuality"];
+
+                [adaptiveFormats addObject:format];
+            }
+
+
+            // sabr testing
+            TRSabrStream *sabrStream = [[TRSabrStream alloc] initWithStreamUrl:sabrURL ustreamConfig:ustreamConfig formats:adaptiveFormats videoId:videoId];
+            [ytStreams addObject:sabrStream];
+
+
+            // NSURL *sabrURL = [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%i/master.m3u8", sabrStream.httpServer.port]];
+            // id stream = nil;
+            // if ([version() isEqualToString:@"1.3.0"] || [version() isEqualToString:@"1.2.1"]) { // technically this should be 4, but then cellular fails
+            //     stream = [NSClassFromString(@"YTStream") streamWithURL:sabrStream format:5 encrypted:NO precached:NO];
+            // } else if (TRIsVersion2x()) {
+            //     stream = [NSClassFromString(@"YTStream") streamWithURL:sabrStream MIMEType:@"sabr" format:5];
+            // } else {
+            //     stream = [NSClassFromString(@"YTStream") streamWithURL:sabrStream format:5 encrypted:NO];
+            // }
+            // if (stream) {
+            //     [ytStreams addObject:stream];
+            // }
+        }
+        
+            
+
+        NSArray *formats = [TRJSONUtils arrayFromJSON:json keyPath:@"streamingData.formats"];
+        for (NSDictionary *format in formats) {
+            // TODO: check if the URL even needs to be deciphered
+            NSString *urlString = format[@"url"];
+            NSString *signatureCipher = format[@"signatureCipher"];
+            if (urlString || signatureCipher) {
+                NSURL *url = nil;
+
+                if ([preferences[@"StreamType"] isEqualToString:@"web"] || [preferences[@"StreamType"] isEqualToString:@"mweb"] || preferences[@"StreamType"] == nil) {
+                    NSString *decipheredURL = [[TRPOTokenSolver sharedInstance] decipherUrl:urlString signatureCipher:signatureCipher];
+                    if (decipheredURL) {
+                        url = [NSURL URLWithString:decipheredURL];
+                    } else {
+                        url = [NSURL URLWithString:urlString];
+                    }
+                } else {
+                    url = [NSURL URLWithString:urlString];
+                }
+                // todo: check if this is android before running this.
+                
+
+                if (url) {
+                    id stream = nil;
+                    if ([version() isEqualToString:@"1.3.0"] || [version() isEqualToString:@"1.2.1"]) { // technically this should be 4, but then cellular fails
+                        stream = [NSClassFromString(@"YTStream") streamWithURL:url format:1 encrypted:NO precached:NO];
+                    } else if (TRIsVersion2x()) {
+                        stream = [NSClassFromString(@"YTStream") streamWithURL:url MIMEType:@"video/mp4" format:1];
+                    } else {
+                        stream = [NSClassFromString(@"YTStream") streamWithURL:url format:1 encrypted:NO];
+                    }
+                    if (stream) {
+                        [ytStreams addObject:stream];
+                    }
+                }
+            }
+        }
+        
+    } else {
+        // they wanna use a custom url for playback, so we disable everything!
+        NSURL *url = nil;
+        if ([preferences[@"StreamType"] isEqualToString:@"tuberepair"]) {
+            url = [NSURL URLWithString:[NSString stringWithFormat:@"https://tuberepair.uptimetrackers.com/getvideo/%@", videoId]];
+        } else {
+            url = [NSURL URLWithString:[preferences[@"CustomStreamURL"] stringByReplacingOccurrencesOfString:@"%v" withString:videoId]];
+        }
+        // we don't really have a way of knowing the video quality so
+        id stream = nil;
+        if ([version() isEqualToString:@"1.3.0"] || [version() isEqualToString:@"1.2.1"]) {
+            stream = [NSClassFromString(@"YTStream") streamWithURL:url format:2 encrypted:NO precached:NO];
+        } else if (TRIsVersion2x()) {
+            stream = [NSClassFromString(@"YTStream") streamWithURL:url MIMEType:@"video/mp4" format:2];
+        } else {
+            stream = [NSClassFromString(@"YTStream") streamWithURL:url format:2 encrypted:NO];
+        }
+        if (stream) {
+            [ytStreams addObject:stream];
+        }
+    }
+    
+    
+    NSMutableArray *availableCountries = [NSMutableArray array];
+    NSArray *countries = [TRJSONUtils arrayFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.availableCountries"];
+    for (NSString *country in countries) {
+        if ([country isKindOfClass:[NSString class]]) {
+            [availableCountries addObject:[country lowercaseString]];
+        }
+    }
+    
+    NSString *uploadDateStr = [TRJSONUtils stringFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.uploadDate"];
+    NSString *publishDateStr = [TRJSONUtils stringFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.publishDate"];
+    NSDate *uploadDate = [TRJSONUtils dateFromRFC3339:uploadDateStr];
+    NSDate *publishDate = [TRJSONUtils dateFromRFC3339:publishDateStr];
+
+    BOOL isPrivate = NO;
+    BOOL isListed = YES;
+    BOOL ratingAllowed = YES;
+
+    if ([TRJSONUtils stringFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.isUnlisted"]) {
+        isListed = ![TRJSONUtils boolFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.isUnlisted"];
+    }
+
+    if ([TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.isPrivate"]) {
+        isPrivate = [TRJSONUtils boolFromJSON:json keyPath:@"videoDetails.isPrivate"];
+    }
+
+    if ([TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.allowRatings"]) {
+        ratingAllowed = [TRJSONUtils boolFromJSON:json keyPath:@"videoDetails.allowRatings"];
+    }
+    
+    uint64_t duration = [TRJSONUtils intFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.lengthSeconds"];
+    uint64_t viewCount = [TRJSONUtils intFromJSON:json keyPath:@"videoDetails.viewCount"];
+    uint64_t likesCount = [TRJSONUtils intFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.likeCount"];
+    
+    NSString *category = [TRJSONUtils stringFromJSON:json keyPath:@"microformat.playerMicroformatRenderer.category"];
+    
+    id videoState = [[NSClassFromString(@"YTVideoState") alloc] initWithCode:0 reason:@""];
+
+    // subtitles
+    NSMutableArray *subtitleTracks = [NSMutableArray array];
+    NSArray *subtitleTracksUnparsed = [TRJSONUtils arrayFromJSON:json keyPath:@"captions.playerCaptionsTracklistRenderer.captionTracks"];
+    if (subtitleTracksUnparsed) {
+        for (NSDictionary *track in subtitleTracksUnparsed) {
+            NSString *subtitleURL = track[@"baseUrl"];
+            if ([subtitleURL hasPrefix:@"/"]) {
+                subtitleURL = [NSString stringWithFormat:@"https://www.youtube.com%@", subtitleURL];
+            }
+            NSString *subtitleText = track[@"name"][@"runs"][0][@"text"];
+            if (subtitleText == nil)
+                subtitleText = track[@"name"][@"simpleText"];
+            if (TRIsVersion2x()) {
+                [subtitleTracks addObject:[[NSClassFromString(@"YTSubtitlesTrack") alloc] initWithLanguageCode:track[@"languageCode"] languageName:subtitleText trackName:[NSURL URLWithString:subtitleURL] format:@"ass"]];
+            } else {
+                [subtitleTracks addObject:[[NSClassFromString(@"YTSubtitlesTrack") alloc] initWithLanguageCode:track[@"languageCode"] languageName:subtitleText trackName:[NSURL URLWithString:subtitleURL]]];
+            }
+        }
+    }
+    
+    NSLog(@"streams -> %@", ytStreams);
+
+    id video = nil;
+    if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.title"]
+            description:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.shortDescription"]
+            uploaderDisplayName:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.author"]
+            uploaderChannelID:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.channelId"]
+            uploadedDate:uploadDate
+            publishedDate:publishDate
+            duration:duration
+            viewCount:viewCount
+            likesCount:likesCount
+            dislikesCount:0
+            state:videoState
+            streams:ytStreams
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:subtitleTracks ? subtitleTracks : nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            allowedCountries:availableCountries
+            deniedCountries:@[]
+            categoryLabel:@"Gaming"
+            categoryTerm:category ?: @"Unknown"
+            tags:@[]
+            adultContent:NO
+            videoPro:nil];
+    } else if ([version() isEqualToString:@"1.1.0"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.title"]
+            description:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.shortDescription"]
+            uploaderDisplayName:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.author"]
+            uploaderChannelID:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.channelId"]
+            uploadedDate:uploadDate
+            publishedDate:publishDate
+            duration:duration
+            viewCount:viewCount
+            likesCount:likesCount
+            dislikesCount:0
+            ratingAllowed:ratingAllowed
+            state:videoState
+            streams:ytStreams
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:subtitleTracks ? subtitleTracks : nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            allowedCountries:availableCountries
+            deniedCountries:@[]
+            categoryLabel:@"Gaming"
+            categoryTerm:category ?: @"Unknown"
+            adultContent:NO
+            editURL:nil
+            videoPro:nil];
+    } else if ([version() isEqualToString:@"1.2.1"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.title"]
+            description:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.shortDescription"]
+            uploaderDisplayName:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.author"]
+            uploaderChannelID:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.channelId"]
+            uploadedDate:uploadDate
+            publishedDate:publishDate
+            duration:duration
+            viewCount:viewCount
+            likesCount:likesCount
+            dislikesCount:0
+            ratingAllowed:ratingAllowed
+            state:videoState
+            streams:ytStreams
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:subtitleTracks ? subtitleTracks : nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            categoryLabel:@"Gaming"
+            categoryTerm:category ?: @"Unknown"
+            adultContent:NO
+            editURL:nil
+            paidContent:NO
+            videoPro:nil
+            liveEventURL:nil
+            currentViewers:0
+        ];
+    } else if ([version() isEqualToString:@"1.3.0"] || [version() isEqualToString:@"1.2.1"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.title"]
+            description:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.shortDescription"]
+            uploaderDisplayName:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.author"]
+            uploaderChannelID:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.channelId"]
+            uploadedDate:uploadDate
+            publishedDate:publishDate
+            duration:duration
+            viewCount:viewCount
+            likesCount:likesCount
+            dislikesCount:0
+            ratingAllowed:ratingAllowed
+            state:videoState
+            streams:ytStreams
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:subtitleTracks ? subtitleTracks : nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            listed:isListed
+            categoryLabel:@"Gaming"
+            categoryTerm:category ?: @"Unknown"
+            adultContent:NO
+            editURL:nil
+            paidContent:NO
+            videoPro:nil
+            liveEventURL:nil
+            currentViewers:39
+        ];
+    } else {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.title"]
+            description:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.shortDescription"]
+            uploaderDisplayName:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.author"]
+            uploaderChannelID:[TRJSONUtils stringFromJSON:json keyPath:@"videoDetails.channelId"]
+            uploadedDate:uploadDate
+            publishedDate:publishDate
+            duration:duration
+            viewCount:viewCount
+            likesCount:likesCount
+            dislikesCount:0
+            ratingAllowed:ratingAllowed
+            state:videoState
+            streams:ytStreams
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:subtitleTracks ? subtitleTracks : nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:2147483647
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            listed:isListed
+            categoryLabel:@"Gaming"
+            categoryTerm:category ?: @"Unknown"
+            adultContent:NO
+            editURL:nil
+            paidContent:NO
+            privateContent:isPrivate
+            videoPro:nil
+            liveEventURL:nil
+            currentViewers:39
+        ];
+    }
+
+    // video stats stuff
+    NSString *videoPlaybackUrl = [TRJSONUtils stringFromJSON:json keyPath:@"playbackTracking.videostatsPlaybackUrl.baseUrl"];
+    NSArray *playbackUrlQueryParamsCombined = [[videoPlaybackUrl componentsSeparatedByString:@"?"][1] componentsSeparatedByString:@"&"];
+    NSMutableDictionary *playbackUrlQueryParams = [[NSMutableDictionary alloc] initWithCapacity:playbackUrlQueryParamsCombined.count];
+
+    for (NSString *query in playbackUrlQueryParamsCombined) {
+        NSArray *splitParam = [query componentsSeparatedByString:@"="];
+        [playbackUrlQueryParams setValue:splitParam[1] forKey:splitParam[0]];
+    }
+
+    objc_setAssociatedObject(video, "videoStatsInfo", playbackUrlQueryParams, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    
+    return [video autorelease];
+}
+
+#pragma mark - Feed Item (Minimal Video Details from Feed)
+
+- (id)translateFeedItem:(NSDictionary *)json 
+            withContext:(NSDictionary *)context 
+                  error:(NSError **)error {
+    
+    // Unwrap the video data from various container formats
+    NSDictionary *videoData = [self unwrapVideoData:json];
+    NSString *dataType = [self detectDataType:json];
+    NSLog(@"data type -> %@", dataType);
+    
+    if (!videoData) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRVideoTranslator" code:3 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Could not find video data"}];
+        }
+        NSLog(@"Could not find video data!");
+        return nil;
+    }
+
+    if ([dataType isEqualToString:@"playlistVideoRenderer"]) {
+        if (![TRJSONUtils stringFromJSON:videoData keyPath:@"videoInfo.runs[1].text"]) {
+            return nil;
+        }
+    }
+    
+    // Skip upcoming/scheduled videos
+    if (videoData[@"upcomingEventData"]) {
+        NSLog(@"skipping upcoming & scheduled video");
+        return nil;
+    }
+
+    NSDictionary *preferences = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.legacyreborn.tubefixlegacy.plist"];
+    if (!preferences[@"ShowLiveContent"] && [[TRJSONUtils stringFromJSON:videoData keyPath:@"thumbnailOverlays[0].thumbnailOverlayTimeStatusRenderer.style"] isEqualToString:@"LIVE"]) {
+        return nil;
+    }
+    
+    BOOL isShortsLockup = [dataType isEqualToString:@"shortsLockupViewModel"];
+    BOOL isShort = isShortsLockup || [dataType isEqualToString:@"reelItemRenderer"];
+
+    NSString *videoId = nil;
+    if ([dataType isEqualToString:@"lockupViewModel"]) {
+        videoId = videoData[@"contentId"];
+    } else if (isShortsLockup) {
+        videoId = [TRJSONUtils stringFromJSON:videoData keyPath:@"onTap.innertubeCommand.reelWatchEndpoint.videoId"];
+        NSString *entityId = videoData[@"entityId"];
+        if (!videoId && [entityId isKindOfClass:[NSString class]] && [entityId hasPrefix:@"shorts-shelf-item-"]) {
+            videoId = [entityId substringFromIndex:[@"shorts-shelf-item-" length]];
+        }
+    } else {
+        videoId = videoData[@"videoId"];
+    }
+    if (![videoId isKindOfClass:[NSString class]] || [videoId length] == 0) {
+        return nil;
+    }
+    
+    // Title - different path for videoWithContextRenderer
+    NSString *title = nil;
+    if ([dataType isEqualToString:@"videoWithContextRenderer"]) {
+        title = [TRJSONUtils stringFromJSON:videoData keyPath:@"headline.runs[0].text"];
+    } else if ([dataType isEqualToString:@"lockupViewModel"]) {
+        NSLog(@"metadata.lockupMetadataViewModel.title.content");
+        title = [TRJSONUtils stringFromJSON:videoData keyPath:@"metadata.lockupMetadataViewModel.title.content"];
+    } else if ([dataType isEqualToString:@"reelItemRenderer"]) {
+        // Shorts headlines are usually a plain simpleText, not runs
+        title = [TRJSONUtils stringFromJSON:videoData keyPath:@"headline.simpleText"];
+        if (!title) title = [TRJSONUtils stringFromJSON:videoData keyPath:@"headline.runs[0].text"];
+    } else if (isShortsLockup) {
+        title = [TRJSONUtils stringFromJSON:videoData keyPath:@"overlayMetadata.primaryText.content"];
+    } else {
+        title = [TRJSONUtils stringFromJSON:videoData keyPath:@"title.runs[0].text"];
+    }
+    // NSLog(@"title -> %@", title);
+    if (!title) title = @"";
+
+    if ([title isEqualToString:@"[Deleted video]"]) return nil;
+    
+    // Uploader display name
+    NSString *uploaderName = [TRJSONUtils stringFromJSON:videoData keyPath:@"shortBylineText.runs[0].text"];
+    if ([dataType isEqualToString:@"lockupViewModel"]) {
+        uploaderName = [TRJSONUtils stringFromJSON:videoData keyPath:@"metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[0].metadataParts[0].text.content"];
+    } else if (isShortsLockup) {
+        uploaderName = [TRJSONUtils stringFromJSON:videoData keyPath:@"belowThumbnailMetadata.primaryText.content"];
+    }
+    if (!uploaderName && context) {
+        // For channel videos, get from page header
+        uploaderName = [TRJSONUtils stringFromJSON:context keyPath:@"header.pageHeaderRenderer.pageTitle"];
+    }
+    if (!uploaderName) uploaderName = @"";
+    
+    // Channel ID
+    NSString *channelId = nil;
+    if ([dataType isEqualToString:@"lockupViewModel"]) {
+        channelId = [TRJSONUtils stringFromJSON:videoData 
+                        keyPath:@"metadata.lockupMetadataViewModel.image.decoratedAvatarViewModel.rendererContext.commandContext.onTap.innertubeCommand.browseEndpoint.browseId"];
+    } else {
+        channelId = [TRJSONUtils stringFromJSON:videoData 
+                        keyPath:@"shortBylineText.runs[0].navigationEndpoint.browseEndpoint.browseId"];
+    }
+
+    NSString *channelThumbnail = nil;
+    if ([dataType isEqualToString:@"lockupViewModel"]) {
+        channelThumbnail = [TRJSONUtils stringFromJSON:videoData 
+                        keyPath:@"metadata.lockupMetadataViewModel.image.decoratedAvatarViewModel.avatar.avatarViewModel.image.sources[0].url"];
+    } else {
+        channelThumbnail = [TRJSONUtils stringFromJSON:videoData 
+                        keyPath:@"channelThumbnail.thumbnails[0].url"];
+    }
+    
+    // Thumbnails 
+    NSArray *thumbArray = [TRJSONUtils arrayFromJSON:videoData keyPath:@"thumbnail.thumbnails"];
+    if ([dataType isEqualToString:@"lockupViewModel"]) {
+        thumbArray = [TRJSONUtils arrayFromJSON:videoData keyPath:@"contentImage.thumbnailViewModel.image.sources"];
+    }
+    NSDictionary *thumbnails = [TRJSONUtils thumbnailsFromArray:thumbArray];
+    NSURL *portraitThumbnail = nil;
+    if (isShort) {
+        NSArray *portraitSources = isShortsLockup ? [TRJSONUtils arrayFromJSON:videoData keyPath:@"thumbnail.sources"] : thumbArray;
+        NSDictionary *firstSource = ([portraitSources isKindOfClass:[NSArray class]] && [portraitSources count] > 0) ? portraitSources[0] : nil;
+        NSString *portraitURLString = [firstSource isKindOfClass:[NSDictionary class]] ? firstSource[@"url"] : nil;
+        if ([portraitURLString isKindOfClass:[NSString class]]) {
+            portraitThumbnail = [NSURL URLWithString:portraitURLString];
+        }
+        thumbnails = TRLandscapeThumbnailsForVideoId(videoId);
+    }
+    
+    // Duration from lengthText
+    NSString *durationText = [TRJSONUtils stringFromJSON:videoData keyPath:@"lengthText.runs[0].text"];
+    if ([dataType isEqualToString:@"lockupViewModel"]) {
+        durationText = [TRJSONUtils stringFromJSON:videoData keyPath:@"contentImage.thumbnailViewModel.overlays[0].thumbnailOverlayBadgeViewModel.thumbnailBadges[0].thumbnailBadgeViewModel.text"];
+        if (durationText == nil) {
+            durationText = [TRJSONUtils stringFromJSON:videoData keyPath:@"contentImage.thumbnailViewModel.overlays[0].thumbnailBottomOverlayViewModel.badges[0].thumbnailBadgeViewModel.text"];
+        }
+    }
+    long duration = [TRJSONUtils secondsFromDurationText:durationText];
+    
+    // === CRITICAL: Views and Date from Accessibility Label ===
+    // The accessibility label has format:
+    // "Video Title by Channel Name 35,908 views 5 days ago 4 minutes, 20 seconds"
+
+    uint64_t views = 0;
+    NSDate *uploadDate = nil;
+    
+    // Get accessibility label based on renderer type
+    NSString *accessibilityLabel = nil;
+    if ([dataType isEqualToString:@"videoWithContextRenderer"]) {
+        accessibilityLabel = [TRJSONUtils stringFromJSON:videoData 
+                                                 keyPath:@"headline.accessibility.accessibilityData.label"];
+    } else if ([dataType isEqualToString:@"lockupViewModel"]) {
+        accessibilityLabel = [TRJSONUtils stringFromJSON:videoData 
+                                                 keyPath:@"rendererContext.accessibilityContext.label"];
+    } else {
+        accessibilityLabel = [TRJSONUtils stringFromJSON:videoData 
+                                                 keyPath:@"title.accessibility.accessibilityData.label"];
+    }
+
+    // NSLog(@"accessiblity label -> %@", accessibilityLabel);
+    
+    if (accessibilityLabel && [accessibilityLabel length] > 0) {
+        // Parse accessibility label for views and date
+        // Instead of calculating word positions, search for "views" keyword
+        NSArray *accessibilityParts = [accessibilityLabel componentsSeparatedByString:@" "];
+        
+        // Find the index of "views" keyword
+        NSInteger viewsIndex = NSNotFound;
+        for (NSInteger i = 0; i < [accessibilityParts count]; i++) {
+            if ([[accessibilityParts[i] lowercaseString] isEqualToString:@"views"]) {
+                viewsIndex = i;
+                break;
+            }
+        }
+        
+        if (viewsIndex != NSNotFound && viewsIndex > 0) {
+            // The views count is the word before "views"
+            NSString *viewsPart = accessibilityParts[viewsIndex - 1];
+            viewsPart = [viewsPart stringByReplacingOccurrencesOfString:@"," withString:@""];
+            views = [viewsPart longLongValue];
+            
+            // Extract upload date (remaining words after "views")
+            // Format: "5 days ago" or "3 weeks ago" etc.
+            if ([accessibilityParts count] > viewsIndex + 1) {
+                NSMutableString *dateString = [NSMutableString string];
+                for (NSInteger i = viewsIndex + 1; i < [accessibilityParts count]; i++) {
+                    NSString *part = accessibilityParts[i];
+                    part = [part stringByReplacingOccurrencesOfString:@"," withString:@""];
+                    [dateString appendFormat:@"%@ ", part];
+                    
+                    // Stop after we collect the time unit and "ago"
+                    // Pattern: "41 minutes ago" 
+                    if ([[part lowercaseString] isEqualToString:@"ago"]) {
+                        break;
+                    }
+                }
+                uploadDate = [TRJSONUtils dateFromTimeAgo:[dateString stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]];
+            }
+        }
+    } else {
+        // Fallback: try direct viewCountText path
+        NSString *viewText = [TRJSONUtils stringFromJSON:videoData keyPath:@"viewCountText.runs[0].text"];
+        if (!viewText) {
+            viewText = [TRJSONUtils stringFromJSON:videoData keyPath:@"viewCountText.simpleText"];
+        }
+        if ([dataType isEqualToString:@"lockupViewModel"]) {
+            viewText = [TRJSONUtils stringFromJSON:videoData keyPath:@"metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[0].metadataParts[1].text.content"];
+        } else if (isShortsLockup) {
+            viewText = [TRJSONUtils stringFromJSON:videoData keyPath:@"overlayMetadata.secondaryText.content"];
+        }
+        if (viewText) {
+            views = TRViewCountFromText(viewText);
+        }
+        
+        // Fallback: try publishedTimeText
+        NSString *timeAgo = [TRJSONUtils stringFromJSON:videoData keyPath:@"publishedTimeText.runs[0].text"];
+        if (!timeAgo) {
+            timeAgo = [TRJSONUtils stringFromJSON:videoData keyPath:@"publishedTimeText.simpleText"];
+        }
+        if ([dataType isEqualToString:@"lockupViewModel"]) {
+            timeAgo = [TRJSONUtils stringFromJSON:videoData keyPath:@"metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[0].metadataParts[2].text.content"];
+        } else if (isShortsLockup) {
+            timeAgo = [TRJSONUtils stringFromJSON:videoData keyPath:@"belowThumbnailMetadata.secondaryText.content"];
+        }
+        if (timeAgo) {
+            uploadDate = [TRJSONUtils dateFromTimeAgo:timeAgo];
+        }
+    }
+    
+    if (!uploadDate) {
+        uploadDate = [NSDate date];
+    }
+    
+    id videoState = [[NSClassFromString(@"YTVideoState") alloc] initWithCode:0 reason:@""];
+    
+    // Default allowed countries
+    NSArray *defaultCountries = @[@"ar", @"au", @"bd", @"be", @"bg", @"br", @"ca", @"cl", @"co", @"cz", 
+                                   @"de", @"dk", @"dz", @"ee", @"eg", @"es", @"et", @"fi", @"fr", @"gb", 
+                                   @"gr", @"hk", @"hr", @"hu", @"id", @"ie", @"il", @"in", @"ir", @"is", 
+                                   @"it", @"jo", @"jp", @"ke", @"kr", @"lt", @"lv", @"ma", @"mx", @"my", 
+                                   @"ng", @"nl", @"no", @"nz", @"ph", @"pk", @"pl", @"pt", @"ro", @"rs", 
+                                   @"ru", @"sa", @"se", @"sg", @"si", @"sk", @"th", @"tn", @"tr", @"tw", 
+                                   @"tz", @"ua", @"ug", @"us", @"vn", @"ye", @"za"];
+    // NSLog(@"views -> %llu", views);
+
+    id video = nil;
+    if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:title
+            description:@""
+            uploaderDisplayName:uploaderName
+            uploaderChannelID:channelId ?: @""
+            uploadedDate:uploadDate
+            publishedDate:uploadDate
+            duration:duration
+            viewCount:views
+            likesCount:0
+            dislikesCount:0
+            state:videoState
+            streams:@[]
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            allowedCountries:defaultCountries
+            deniedCountries:@[]
+            categoryLabel:@"Gaming"
+            categoryTerm:@"Unknown"
+            tags:@[]
+            adultContent:NO
+            videoPro:nil];
+    } else if ([version() isEqualToString:@"1.1.0"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:title
+            description:@""
+            uploaderDisplayName:uploaderName
+            uploaderChannelID:channelId ?: @""
+            uploadedDate:uploadDate
+            publishedDate:uploadDate
+            duration:duration
+            viewCount:views
+            likesCount:0
+            dislikesCount:0
+            ratingAllowed:YES
+            state:videoState
+            streams:@[]
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            allowedCountries:defaultCountries
+            deniedCountries:@[]
+            categoryLabel:@"Gaming"
+            categoryTerm:@"Unknown"
+            adultContent:NO
+            editURL:nil
+            videoPro:nil];
+    } else if ([version() isEqualToString:@"1.2.1"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:title
+            description:@""
+            uploaderDisplayName:uploaderName
+            uploaderChannelID:channelId ?: @""
+            uploadedDate:uploadDate
+            publishedDate:uploadDate
+            duration:duration
+            viewCount:views
+            likesCount:0
+            dislikesCount:0
+            ratingAllowed:YES
+            state:videoState
+            streams:@[]
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            categoryLabel:@"Gaming"
+            categoryTerm:@"Unknown"
+            adultContent:NO
+            editURL:nil
+            paidContent:NO
+            videoPro:nil
+            liveEventURL:nil
+            currentViewers:0];
+    } else if ([version() isEqualToString:@"1.3.0"]){
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:title
+            description:@""
+            uploaderDisplayName:uploaderName
+            uploaderChannelID:channelId ?: @""
+            uploadedDate:uploadDate
+            publishedDate:uploadDate
+            duration:duration
+            viewCount:views
+            likesCount:0
+            dislikesCount:0
+            ratingAllowed:YES
+            state:videoState
+            streams:@[[NSClassFromString(@"YTStream") streamWithURL:[NSURL fileURLWithPath:@"https://google.com"] format:1 encrypted:NO precached:NO]]
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            listed:YES // TODO: this should be easy enough to implement properly
+            categoryLabel:@"Gaming"
+            categoryTerm:@"Unknown"
+            adultContent:NO
+            editURL:nil
+            paidContent:NO
+            videoPro:nil
+            liveEventURL:nil
+            currentViewers:0];
+    } else if ([version() isEqualToString:@"1.4.0"]) {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:title
+            description:@""
+            uploaderDisplayName:uploaderName
+            uploaderChannelID:channelId ?: @""
+            uploadedDate:uploadDate
+            publishedDate:uploadDate
+            duration:duration
+            viewCount:views
+            likesCount:0
+            dislikesCount:0
+            ratingAllowed:YES
+            state:videoState
+            streams:@[[NSClassFromString(@"YTStream") streamWithURL:[NSURL fileURLWithPath:@"https://google.com"] format:1 encrypted:NO]]
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            listed:YES // TODO: this should be easy enough to implement properly
+            categoryLabel:@"Gaming"
+            categoryTerm:@"Unknown"
+            adultContent:NO
+            editURL:nil
+            paidContent:NO
+            privateContent:NO // todo: should also be easy enough to implement
+            videoPro:nil
+            liveEventURL:nil
+            currentViewers:0];
+    } else {
+        video = [[NSClassFromString(@"YTVideo") alloc] 
+            initWithID:videoId
+            title:title
+            description:@""
+            uploaderDisplayName:uploaderName
+            uploaderChannelID:channelId ?: @""
+            uploadedDate:uploadDate
+            publishedDate:uploadDate
+            duration:duration
+            viewCount:views
+            likesCount:0
+            dislikesCount:0
+            ratingAllowed:YES
+            state:videoState
+            streams:@[[NSClassFromString(@"YTStream") streamWithURL:[NSURL fileURLWithPath:@"https://google.com"] MIMEType:@"video/mp4" format:1]]
+            thumbnailURLs:thumbnails
+            subtitlesTracksURL:nil
+            commentsAllowed:YES
+            commentsURL:videoId
+            commentsCountHint:0
+            relatedURL:videoId
+            claimed:NO
+            monetized:NO
+            monetizedCountries:@[]
+            listed:YES // TODO: this should be easy enough to implement properly
+            categoryLabel:@"Gaming"
+            categoryTerm:@"Unknown"
+            adultContent:NO
+            editURL:nil
+            paidContent:NO
+            privateContent:NO // todo: should also be easy enough to implement
+            videoPro:nil
+            liveEventURL:nil
+            currentViewers:0];
+    }
+
+    if (channelThumbnail) {
+        objc_setAssociatedObject(video, "uploaderChannelProfilePicture", [NSURL URLWithString:channelThumbnail], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (portraitThumbnail) {
+        TRSetShortsPortraitThumbnail(video, portraitThumbnail);
+    }
+    // remembered for the Shorts player (which Shorts, in feed order)
+    if (video && (isShort || TRJSONItemIsShort(json))) {
+        TRRegisterShortVideo(video, portraitThumbnail);
+    }
+
+    return [video autorelease];
+}
+
+#pragma mark - Helpers
+
+- (NSDictionary *)unwrapVideoData:(NSDictionary *)json {
+    NSDictionary *result = [json objectForKey:@"videoRenderer"];
+    if (result) return result;
+    
+    result = [json objectForKey:@"compactVideoRenderer"];
+    if (result) return result;
+    
+    result = [json objectForKey:@"gridVideoRenderer"];
+    if (result) return result;
+    
+    result = [json objectForKey:@"playlistVideoRenderer"];
+    if (result) return result;
+    
+    result = [json objectForKey:@"videoWithContextRenderer"];
+    if (result) return result;
+    
+    result = [json objectForKey:@"lockupViewModel"];
+    if (result) return result;
+    
+    // Shorts - a bare item (used inside reelShelfRenderer.items and
+    // in the dedicated shorts.x fetch) or wrapped in richItemRenderer
+    // (how it shows up mixed into a regular feed/shelf), same as the
+    // other renderer types above.
+    result = [json objectForKey:@"reelItemRenderer"];
+    if (result) return result;
+
+    result = [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.reelItemRenderer"];
+    if (result) return result;
+
+    // Shorts, current shape (search grid shelves, home/subscription shelves)
+    result = [json objectForKey:@"shortsLockupViewModel"];
+    if (result) return result;
+
+    result = [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.shortsLockupViewModel"];
+    if (result) return result;
+    
+    // Nested in richItemRenderer
+    result = [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.videoRenderer"];
+    if (result) return result;
+    
+    result = [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.videoWithContextRenderer"];
+    if (result) return result;
+
+    result = [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.compactVideoRenderer"];
+    if (result) return result;
+    
+    result = [TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.lockupViewModel"];
+    if (result) return result;
+
+    // Nested in itemSectionRenderer
+    result = [TRJSONUtils dictFromJSON:json keyPath:@"itemSectionRenderer.contents[0].compactVideoRenderer"];
+    if (result) return result;
+    
+    return nil;
+}
+
+- (NSString *)detectDataType:(NSDictionary *)json {
+    if ([json objectForKey:@"videoRenderer"]) return @"videoRenderer";
+    if ([json objectForKey:@"compactVideoRenderer"]) return @"videoRenderer";
+    if ([json objectForKey:@"gridVideoRenderer"]) return @"gridVideoRenderer";
+    if ([json objectForKey:@"playlistVideoRenderer"]) return @"playlistVideoRenderer";
+    if ([json objectForKey:@"videoWithContextRenderer"]) return @"videoWithContextRenderer";
+    if ([json objectForKey:@"lockupViewModel"]) return @"lockupViewModel";
+    if ([json objectForKey:@"reelItemRenderer"]) return @"reelItemRenderer";
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.reelItemRenderer"]) return @"reelItemRenderer";
+    if ([json objectForKey:@"shortsLockupViewModel"]) return @"shortsLockupViewModel";
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.shortsLockupViewModel"]) return @"shortsLockupViewModel";
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.videoRenderer"]) return @"videoRenderer";
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.compactVideoRenderer"]) return @"videoRenderer";
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.videoWithContextRenderer"]) return @"videoWithContextRenderer";
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"richItemRenderer.content.lockupViewModel"]) return @"lockupViewModel";
+    return @"unknown";
+}
+
+#pragma mark - Video Enhancement (/next response)
+
+- (void)enhanceVideo:(YTVideo*)video withNextResponse:(NSDictionary *)nextData {
+    if (!video || !nextData) return;
+    
+    @try {
+        
+
+        long likes = [video likesCount];
+
+        if (!nextData[@"next"]) {
+            // Navigate to the like button data in /next response
+            NSDictionary *resultContents = nextData[@"next"][@"contents"][@"singleColumnWatchNextResults"][@"results"][@"results"][@"contents"];
+            
+            // like & upload date
+            if ([resultContents isKindOfClass:[NSArray class]]) {
+
+                for (NSDictionary *item in resultContents) {
+                    NSDictionary *metaContents = item[@"slimVideoMetadataSectionRenderer"][@"contents"];    
+                    if (![metaContents isKindOfClass:[NSArray class]]) continue;
+                    for (NSDictionary *metaItem in metaContents) {
+                        NSDictionary *actionBar = metaItem[@"slimVideoActionBarRenderer"];
+                        if (!actionBar) continue;
+                        
+                        NSArray *buttons = actionBar[@"buttons"];
+                        if (![buttons isKindOfClass:[NSArray class]]) continue;
+                        
+                        for (NSDictionary *buttonItem in buttons) {
+                            NSDictionary *smbr = [buttonItem objectForKey:@"slimMetadataButtonRenderer"];
+                            if (!smbr) continue;
+                            
+                            NSDictionary *sldbvm = [(NSDictionary*)[smbr objectForKey:@"button"] objectForKey:@"segmentedLikeDislikeButtonViewModel"];
+                            if (!sldbvm) continue;
+                            
+                            // Extract like status
+                            NSDictionary *likeButtonVM = [sldbvm objectForKey:@"likeButtonViewModel"];
+                            NSString *status = likeButtonVM[@"likeStatusEntity"][@"likeStatus"];
+                            
+                            // todo dislikes
+                            if (status) {
+                                objc_setAssociatedObject(video, "TRLikeStatus", status, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                            }
+
+                            for (NSDictionary *engagementPanel in nextData[@"next"][@"engagementPanels"]) {
+                                NSString *dateString = engagementPanel[@"engagementPanelSectionListRenderer"][@"content"][@"structuredDescriptionContentRenderer"][@"items"][0][@"videoDescriptionHeaderRenderer"][@"publishDate"][@"runs"][0][@"text"];
+                                if (dateString != nil) {
+                                    if ([dateString hasSuffix:@" ago"]) {
+                                        NSDate *date = [TRJSONUtils dateFromTimeAgo:dateString];
+                                        [video setValue:date forKey:l(@"uploadedDate")];
+                                        [video setValue:date forKey:l(@"publishedDate")];
+                                    } else {
+                                        NSDate *date = [TRJSONUtils dateFromShortDate:dateString];
+                                        [video setValue:date forKey:l(@"uploadedDate")];
+                                        [video setValue:date forKey:l(@"publishedDate")];
+                                    }
+                                }
+                            }
+
+                            // Extract like count
+                            NSString *accessibilityText = likeButtonVM[@"likeButtonViewModel"][@"toggleButtonViewModel"][@"toggleButtonViewModel"][@"defaultButtonViewModel"][@"buttonViewModel"][@"accessibilityText"];
+
+                            if (accessibilityText) { 
+                                NSArray *accessibilityTextContent = [accessibilityText componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                                likes = [TRJSONUtils numberFromText:accessibilityTextContent[5]];
+                                if (likes > 0) {
+                                    [video setValue:[NSNumber numberWithLong:likes] forKey:l(@"likesCount")];
+                                }
+                                break;
+                            }
+                        }
+                        
+                        
+                    }
+                }
+            }
+
+            // comment count
+            // this number *could* be more accurate, normal web serves it with the full count.
+            NSArray *engagementPanels = nextData[@"next"][@"engagementPanels"];
+            if ([engagementPanels isKindOfClass:[NSArray class]]) {
+                for (NSDictionary *panel in engagementPanels) {
+                    if (![panel[@"engagementPanelSectionListRenderer"][@"panelIdentifier"] isEqualToString:@"engagement-panel-comments-section"]) continue;
+                    NSString *commentCount = panel[@"engagementPanelSectionListRenderer"][@"header"][@"engagementPanelTitleHeaderRenderer"][@"contextualInfo"][@"runs"][0][@"text"];
+                    if (commentCount) {
+                        [video setValue:[NSNumber numberWithLong:[TRJSONUtils numberFromText:commentCount]] forKey:l(@"commentsCountHint")];
+                    }
+                }
+            }
+        }
+        
+        double dislikeRatio = 0;
+        if (nextData[@"dislikes"]) {
+            double rawLikes = [nextData[@"dislikes"][@"rawLikes"] doubleValue];
+            double rawDislikes = [nextData[@"dislikes"][@"rawDislikes"] doubleValue];
+            dislikeRatio = rawDislikes/rawLikes;
+            NSLog(@"(raw) dislikes -> %f, likes -> %f, dislikeRatio -> %f", rawDislikes, rawLikes, dislikeRatio);
+            [video setValue:nextData[@"dislikes"][@"dislikes"] forKey:l(@"dislikesCount")];
+            // [video setValue:nextData[@"dislikes"][@"likes"] forKey:l(@"likesCount")];
+            // NSLog(@"date -> %@", [TRJSONUtils dateFromISO8601:nextData[@"dislikes"][@"dateCreated"]]);
+            // [video setValue:[TRJSONUtils dateFromISO8601:nextData[@"dislikes"][@"dateCreated"]] forKey:@"uploadedDate_"];
+            // [video setValue:[TRJSONUtils dateFromISO8601:nextData[@"dislikes"][@"dateCreated"]] forKey:@"publishedDate_"];
+        }
+    
+        if (likes > 0 && dislikeRatio != 0) {
+            [video setValue:[NSNumber numberWithLong:likes*dislikeRatio] forKey:l(@"dislikesCount")];
+        }
+        
+        
+    } @catch (NSException *e) {
+        NSLog(@"TRVideoTranslator: Failed to enhance video: %@", e);
+    }
+}
+
+@end

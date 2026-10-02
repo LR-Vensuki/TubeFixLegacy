@@ -1,0 +1,484 @@
+// TRFeedTranslator.m
+// TubeFixLegacy
+//
+// Feed translator implementation
+
+#import "TRFeedTranslator.h"
+#import "TRVideoTranslator.h"
+#import "TRChannelTranslator.h"
+#import "TRJSONUtils.h"
+#import "TRContinuation.h"
+#import "../appheaders.h"
+#import "../general.h"
+#import "../TRShorts.h"
+
+@implementation TRFeedTranslator
+
+#pragma mark - TRJSONTranslatorProtocol
+
++ (TREndpointType)supportedEndpoint {
+    return TREndpointTypeFeed;
+}
+
+- (BOOL)canTranslateJSON:(NSDictionary *)json {
+    // Various feed response formats
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"contents.singleColumnBrowseResultsRenderer"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"contents.sectionListRenderer"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"contents.twoColumnWatchNextResults"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"contents.singleColumnWatchNextResults"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"onResponseReceivedActions[0].reloadContinuationItemsCommand.continuationItems"]) {
+        return YES;
+    }
+    if ([TRJSONUtils dictFromJSON:json keyPath:@"onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems"]) {
+        return YES;
+    }
+    return NO;
+}
+
+- (id)translateJSONAsEvent:(NSDictionary *)json error:(NSError **)error {
+    if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRFeedTranslator" code:1 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid input"}];
+        }
+        return nil;
+    }
+    
+    
+
+    NSArray *items = [self expandShortsAwareItems:[self extractItemsFromFeed:json]];
+    NSMutableArray *entries = [NSMutableArray array];
+    NSString *continuationToken = nil;
+    
+    // TODO: move this somewhat to it's own space like comments, how that app actually expects it
+    TRVideoTranslator *videoTranslator = [[[TRVideoTranslator alloc] init] autorelease];
+    
+    continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"contents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+    if (!continuationToken) continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+
+    for (NSDictionary *item in items) {
+        if (![item isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+        
+        // Skip continuation items
+        if ([item objectForKey:@"continuationItemRenderer"]) {
+            continuationToken = item[@"continuationItemRenderer"][@"continuationEndpoint"][@"continuationCommand"][@"token"];
+            continue;
+        }
+        
+        NSError *itemError = nil;
+        YTVideo *entry = [videoTranslator translateFeedItem:item withContext:json error:&itemError];
+        
+        // NSLog(@"actions -> %@", [self valueForKey:@"actionsLookup_"]);
+        if (entry) {
+            if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"]) {
+                [entries addObject:[[NSClassFromString(@"YTEvent") alloc] initWithAuthorDisplayName:[entry uploaderDisplayName]
+                    authorUserID:[entry uploaderChannelID]
+                    action:9 // 5 = uploaded 9 = recommended
+                    target:[entry uploaderChannelID]
+                    when:[entry uploadedDate]
+                    video:entry
+                    groupID:[entry title]
+                    feedURL:[NSURL URLWithString:@"https://google.com"]
+                ]];
+            } else {
+                [entries addObject:[[NSClassFromString(@"YTEvent") alloc] initWithAuthorDisplayName:[entry uploaderDisplayName]
+                    authorUserID:[entry uploaderChannelID]
+                    action:9 // 5 = uploaded 9 = recommended
+                    target:[entry uploaderChannelID]
+                    targetDisplayName:[entry uploaderDisplayName]
+                    when:[entry uploadedDate]
+                    video:entry
+                    groupID:[entry title]
+                    feedURL:[NSURL URLWithString:@"https://google.com"]
+                    title:@"title"
+                ]];
+            }
+            // [entries addObject:entry];
+        }
+    }
+    
+    id contiunationData = nil;
+    if (continuationToken) {
+        contiunationData = [TRContinuation initWithToken:continuationToken];
+    }
+
+    unsigned long long totalResults = 2147483647UL;
+    if (json[@"estimatedResults"] != nil) {
+        totalResults = [json[@"estimatedResults"] intValue];
+    }
+
+    id page = [[[NSClassFromString(@"YTPage") alloc] 
+        initWithEntries:entries 
+        totalResults:totalResults // todo: make better
+        entriesPerPage:[entries count] 
+        startIndex:1 
+        nextURL:contiunationData //// right now continuation has some issues missing the channel information, and I don't wanna bother with it right now.
+        previousURL:nil
+    ] autorelease];
+  
+    return page;
+}
+
+-(id)translateJSON:(NSDictionary *)json error:(NSError **)error {
+    // todo: make this go bye bye
+    if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRFeedTranslator" code:1 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid input"}];
+        }
+        return nil;
+    }
+    
+    NSArray *items = [self extractItemsFromFeed:json];
+    NSMutableArray *entries = [NSMutableArray array];
+    NSString *continuationToken = nil;
+    int type = 0; // bit of a hack till the comment below is done.
+    
+    // TODO: move this somewhat to it's own space like comments, how that app actually expects it
+    TRVideoTranslator *videoTranslator = [[[TRVideoTranslator alloc] init] autorelease];
+    
+    continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"contents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+    if (!continuationToken) continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+
+    for (NSDictionary *item in items) {
+        if (![item isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+        
+        // Skip continuation items
+        if ([item objectForKey:@"continuationItemRenderer"]) {
+            continuationToken = item[@"continuationItemRenderer"][@"continuationEndpoint"][@"continuationCommand"][@"token"];
+            continue;
+        }
+        
+        NSError *itemError = nil;
+        id entry = nil;
+        
+        // Try video first
+        if ((type == 0 || type == 1) && [videoTranslator canTranslateJSON:item]) {
+            entry = [videoTranslator translateFeedItem:item withContext:json error:&itemError];
+            type = 1;
+        }
+        
+        if (entry) {
+            [entries addObject:entry];
+        }
+    }
+
+    // Create YTPage
+    id page = [[[NSClassFromString(@"YTPage") alloc] 
+        initWithEntries:entries 
+        totalResults:100000 // todo: make better
+        entriesPerPage:[entries count] 
+        startIndex:1 
+        nextURL:continuationToken 
+        previousURL:nil
+    ] autorelease];
+    
+    return page;
+}
+
+- (id)translateVideoJSON:(NSDictionary *)json error:(NSError **)error {
+    if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRFeedTranslator" code:1 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid input"}];
+        }
+        return nil;
+    }
+    
+    NSArray *items = [self expandShortsAwareItems:[self extractItemsFromFeed:json]];
+    NSMutableArray *entries = [NSMutableArray array];
+    NSString *continuationToken = nil;
+    int type = 0; // bit of a hack till the comment below is done.
+    
+    // TODO: move this somewhat to it's own space like comments, how that app actually expects it
+    TRVideoTranslator *videoTranslator = [[[TRVideoTranslator alloc] init] autorelease];
+    
+    continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"contents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+    if (!continuationToken) continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+
+    for (NSDictionary *item in items) {
+        if (![item isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+
+        // Skip continuation items
+        if ([item objectForKey:@"continuationItemRenderer"]) {
+            continuationToken = item[@"continuationItemRenderer"][@"continuationEndpoint"][@"continuationCommand"][@"token"];
+            continue;
+        }
+        
+        NSError *itemError = nil;
+        id entry = nil;
+        
+        // Try video first
+        if ((type == 0 || type == 1) && [videoTranslator canTranslateJSON:item]) {
+            entry = [videoTranslator translateFeedItem:item withContext:json error:&itemError];
+            type = 1;
+        }
+        
+        if (entry) {
+            [entries addObject:entry];
+        }
+    }
+
+    // NSLog(@"json -> %@", json);
+    unsigned long long totalResults = 2147483647UL;
+    if (json[@"estimatedResults"] != nil) {
+        totalResults = [json[@"estimatedResults"] intValue];
+    } else if (json[@"header"][@"playlistHeaderRenderer"][@"briefStats"][0][@"runs"][0][@"text"]) {
+        totalResults = [json[@"header"][@"playlistHeaderRenderer"][@"briefStats"][0][@"runs"][0][@"text"] intValue];
+    }
+
+   
+   
+    NSString *basePlaylistsVideosCount = [TRJSONUtils stringFromJSON:json keyPath:@"header.pageHeaderRenderer.content.pageHeaderViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[2].text.content"];
+    if (basePlaylistsVideosCount) {
+        totalResults = [basePlaylistsVideosCount integerValue];
+    }
+    
+    
+    // Create YTPage
+    id page = [[[NSClassFromString(@"YTPage") alloc] 
+        initWithEntries:entries 
+        totalResults:totalResults
+        entriesPerPage:[entries count] 
+        startIndex:1 
+        nextURL:continuationToken 
+        previousURL:nil
+    ] autorelease];
+    
+    return page;
+}
+
+- (id)translateChannelJSON:(NSDictionary *)json error:(NSError **)error {
+    if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRFeedTranslator" code:1 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid input"}];
+        }
+        return nil;
+    }
+    
+    NSArray *items = [self extractItemsFromFeed:json];
+    NSMutableArray *entries = [NSMutableArray array];
+    NSString *continuationToken = nil;
+    int type = 0; // bit of a hack till the comment below is done.
+    
+    // TODO: move this somewhat to it's own space like comments, how that app actually expects it
+    TRChannelTranslator *channelTranslator = [[[TRChannelTranslator alloc] init] autorelease];
+    
+    continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"contents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+    if (!continuationToken) continuationToken = [TRJSONUtils stringFromJSON:json keyPath:@"onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"];
+
+    for (NSDictionary *item in items) {
+        if (![item isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+        
+        // Skip continuation items
+        if ([item objectForKey:@"continuationItemRenderer"]) {
+            continuationToken = item[@"continuationItemRenderer"][@"continuationEndpoint"][@"continuationCommand"][@"token"];
+            continue;
+        }
+        
+        NSError *itemError = nil;
+        id entry = nil;
+        
+        // Try video first
+        if ((type == 0 || type == 2) && [channelTranslator canTranslateJSON:item]) {
+            entry = [channelTranslator translateJSON:item error:&itemError];
+            type = 2;
+        }
+        
+        if (entry) {
+            [entries addObject:entry];
+        }
+    }
+
+    unsigned long long totalResults = 2147483647UL;
+    if (json[@"estimatedResults"] != nil) {
+        totalResults = [json[@"estimatedResults"] intValue];
+    }
+    
+    // Create YTPage
+    id page = [[[NSClassFromString(@"YTPage") alloc] 
+        initWithEntries:entries 
+        totalResults:totalResults // todo: make better
+        entriesPerPage:[entries count] 
+        startIndex:1 
+        nextURL:continuationToken 
+        previousURL:nil
+    ] autorelease];
+    
+    return page;
+}
+
+#pragma mark - Item Extraction
+
+// Shorts show up in feeds either one at a time (a shortsLockupViewModel /
+// reelItemRenderer, or a normal video renderer that opens the Shorts
+// player) or grouped in a shelf (gridShelfViewModel in search,
+// reelShelfRenderer / richShelfRenderer on browse pages) - see
+// TRJSONShortsShelfItems in TRShorts.m for the exact shapes.
+//
+// Single Shorts are left in place: TRVideoTranslator reads all of those
+// shapes, so they become regular rows. A shelf is expanded into its
+// individual Shorts, which then show up as ordinary rows too - the old
+// horizontal shelf row only ever worked on YouTube 1.0.x-1.1.0 (it needs
+// YTFeedTableView) and showed up as an empty row everywhere else. With
+// Shorts turned off in settings, both shelves and single Shorts are
+// dropped.
+- (NSArray *)expandShortsAwareItems:(NSArray *)items {
+    BOOL shortsEnabled = TRShortsEnabled();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:[items count]];
+
+    for (NSDictionary *item in items) {
+        if (![item isKindOfClass:[NSDictionary class]]) {
+            [result addObject:item];
+            continue;
+        }
+
+        NSArray *shelfItems = TRJSONShortsShelfItems(item);
+        if (shelfItems) {
+            if (!shortsEnabled) {
+                continue;
+            }
+            [result addObjectsFromArray:shelfItems];
+            continue;
+        }
+
+        if (!shortsEnabled && TRJSONItemIsShort(item)) {
+            continue;
+        }
+
+        [result addObject:item];
+    }
+
+    return result;
+}
+
+- (NSArray *)extractItemsFromFeed:(NSDictionary *)json {
+    NSArray *items = nil;
+    
+    // Try various known paths for feed items
+    
+    // Gaming home / shelf content
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].shelfRenderer.content.horizontalListRenderer.items"];
+    if (items) return items;
+    
+    // History (special case - multiple sections by date)
+    NSString *browseId = [TRJSONUtils stringFromJSON:json 
+        keyPath:@"responseContext.serviceTrackingParams[0].params[0].value"];
+    if ([browseId isEqualToString:@"FEhistory"]) {
+        NSMutableArray *allItems = [NSMutableArray array];
+        NSArray *sections = [TRJSONUtils arrayFromJSON:json 
+            keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents"];
+        for (NSDictionary *section in sections) {
+            if (section[@"continuationItemRenderer"]) {
+                [allItems addObject:section];
+                continue;
+            }
+            NSArray *sectionItems = [TRJSONUtils arrayFromJSON:section keyPath:@"itemSectionRenderer.contents"];
+            if (sectionItems) {
+                [allItems addObjectsFromArray:sectionItems];
+            }
+        }
+        if ([allItems count] > 0) return allItems;
+
+        // Continuation
+        sections = [TRJSONUtils arrayFromJSON:json 
+            keyPath:@"onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems"];
+        for (NSDictionary *section in sections) {
+            if (section[@"continuationItemRenderer"]) { // seems to break for some reason that i can't figure out.
+                [allItems addObject:section];
+                continue;
+            }
+            NSArray *sectionItems = [TRJSONUtils arrayFromJSON:section keyPath:@"itemSectionRenderer.contents"];
+            if (sectionItems) {
+                [allItems addObjectsFromArray:sectionItems];
+            }
+        }
+        if ([allItems count] > 0) return allItems;
+    }
+    
+    // Playlist
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents"];
+    if (items) return items;
+
+    // Playlists v2
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents"];
+    if (items) return items;
+    
+    // Standard browse section list
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents"];
+    if (items) return items;
+    
+    // Channel videos (tab index 1)
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents"];
+    if (items) return items;
+
+    // Home Feed
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.richGridRenderer.contents"];
+    if (items) return items;
+    
+    // Search results
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.sectionListRenderer.contents[0].itemSectionRenderer.contents"];
+    if (items) return items;
+    
+    // Mobile suggestions
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.singleColumnWatchNextResults.results.results.contents[3].itemSectionRenderer.contents"];
+    if (items) return items;
+    
+    // Desktop suggestions
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[1].itemSectionRenderer.contents"];
+    if (items) return items;
+
+    // Continuation
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems"];
+    if (items) return items;
+
+    // popular thingy
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"onResponseReceivedActions[1].reloadContinuationItemsCommand.continuationItems"];
+    if (items) return items;
+
+    // suggestions continue
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems"];
+    if (items) return items;
+
+    // search continuation
+    items = [TRJSONUtils arrayFromJSON:json 
+        keyPath:@"onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[0].itemSectionRenderer.contents"];
+    if (items) return items;
+    
+    NSLog(@"No array of content found!!!");
+    return @[];
+}
+
+@end

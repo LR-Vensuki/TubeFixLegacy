@@ -1,0 +1,125 @@
+#include <Foundation/Foundation.h>
+#include "general.h"
+#include "common-google/potoken-google.h"
+
+// youtube google app
+@interface YTDeviceAuth : NSObject
+{
+    NSString *deviceId_;
+    NSData *deviceKey_;
+}
+- (id)initWithDeviceId:(id)fp8 deviceKey:(id)fp12;
+@end
+
+
+@interface YTDeviceAuthorizer : NSObject
+{
+    NSMutableArray *requestQueue_;
+    NSString *developerKey_;
+    YTDeviceAuth *deviceAuth_;
+    NSString *secret_;
+    NSUserDefaults *storage_;
+    NSString *uniqueInstallationID_;
+}
+- (void)saveRegistrationToStorage;
+- (void)performRequestQueueWithError:(id)fp8;
++ (id)decryptDeviceKey:(id)fp8 secret:(id)fp12;
+@end
+
+@interface GIPToast : NSObject
++(void)showToast:(NSString*)text forDuration:(double)duration;
+@end
+
+// capture app
+@interface KUDeviceAuth : NSObject
+{
+    NSString *deviceId_;
+    NSData *deviceKey_;
+}
+- (id)initWithDeviceId:(id)fp8 deviceKey:(id)fp12;
+@end
+
+
+@interface KUDeviceAuthorizer : NSObject
+{
+    NSMutableArray *requestQueue_;
+    NSString *developerKey_;
+    YTDeviceAuth *deviceAuth_;
+    NSString *secret_;
+    NSUserDefaults *storage_;
+    NSString *uniqueInstallationID_;
+}
+- (void)saveRegistrationToStorage;
+- (void)performRequestQueueWithError:(id)fp8;
++ (id)decryptDeviceKey:(id)fp8 secret:(id)fp12;
+@end
+
+
+%hook YTDeviceAuthorizer
+
+
+// youtube tries to register the device before using. This is useless to us since we are rewriting most of it. It would be best to eventually make this function never need to be called
+// Actually, if i'm guessing correctly, this is how it does logged out personalized recommendations.
+-(void)beginDeviceRegistration {
+	id decryptedSecret = [%c(YTDeviceAuthorizer) decryptDeviceKey:@"ULxlVAAVMhZ2GeqZA/X1GgqEEIP1ibcd3S+42pkWfmk=" secret:[self valueForKey:l(@"secret")]];
+    YTDeviceAuth *deviceAuth = [[%c(YTDeviceAuth) alloc] initWithDeviceId:@"dmVyeSBzZWN1cmUgaWQ=" deviceKey:decryptedSecret];
+	[self setValue:[deviceAuth retain] forKey:l(@"deviceAuth")];
+    if (deviceAuth)
+    {
+      [self saveRegistrationToStorage];
+      [self performRequestQueueWithError:0];
+      return;
+    }
+	[self performRequestQueueWithError:0]; // a3 in codebase but who's counting
+}
+
+-(void)loadRegistrationFromStorage {
+    TRPOTokenSolver *solver = [TRPOTokenSolver sharedInstance];
+    objc_setAssociatedObject(self, "_challengeSolver", solver, OBJC_ASSOCIATION_RETAIN);
+    solver.errorAlert = ^(NSString *alertText) {
+        [%c(GIPToast) showToast:alertText forDuration:1.5];
+    };
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [solver setupPOTokenGenerationWithAuth:nil]; // nil for now.
+    });
+    
+    return %orig;
+}
+
+%new
+-(TRPOTokenSolver*)challengeSolver {
+    return objc_getAssociatedObject(self, "_challengeSolver");
+}
+
+%end
+
+// %hook YTGDataService 
+
+// -(instancetype)init {
+//     NSLog(@"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+//     dispatch_async(dispatch_get_global_queue( DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(void){
+//         TRPOTokenSolver *solver = [[TRPOTokenSolver alloc] init];
+//         [solver setupPOTokenGenerationWithAuth:nil]; // nil for now.
+//     });
+//     return %orig;
+// }
+
+
+// %end
+
+%hook KUDeviceAuthorizer
+
+-(void)beginDeviceRegistration {
+	id decryptedSecret = [%c(KUDeviceAuthorizer) decryptDeviceKey:@"ULxlVAAVMhZ2GeqZA/X1GgqEEIP1ibcd3S+42pkWfmk=" secret:[self valueForKey:l(@"secret")]];
+    KUDeviceAuth *deviceAuth = [[%c(KUDeviceAuth) alloc] initWithDeviceId:@"dmVyeSBzZWN1cmUgaWQ=" deviceKey:decryptedSecret];
+	[self setValue:[deviceAuth retain] forKey:l(@"deviceAuth")];
+    if (deviceAuth)
+    {
+      [self saveRegistrationToStorage];
+      [self performRequestQueueWithError:0];
+      return;
+    }
+	[self performRequestQueueWithError:0]; // a3 in codebase but who's counting
+}
+
+%end

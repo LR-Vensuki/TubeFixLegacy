@@ -1,0 +1,231 @@
+// TRPlaylistTranslator.m
+// TubeFixLegacy
+//
+// Playlist translator implementation
+
+#import "TRPlaylistTranslator.h"
+#import "TRJSONUtils.h"
+#import "../appheaders.h"
+#import "../general.h"
+#import <CoreGraphics/CoreGraphics.h>
+
+@implementation TRPlaylistTranslator
+
+#pragma mark - TRJSONTranslatorProtocol
+
++ (TREndpointType)supportedEndpoint {
+    return TREndpointTypePlaylist;
+}
+
+- (BOOL)canTranslateJSON:(NSDictionary *)json {
+    // Compact playlist from feed (wrapped in "i")
+    if ([json objectForKey:@"i"]) {
+        NSDictionary *inner = [json objectForKey:@"i"];
+        if ([inner objectForKey:@"compactPlaylistRenderer"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (id)translateJSON:(NSDictionary *)json error:(NSError **)error {
+    if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRPlaylistTranslator" code:1 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid input"}];
+        }
+        return nil;
+    }
+    
+    if (json[@"playlistId"]) {
+        return [self translateCreatedPlaylist:json error:error];
+    }
+
+    if (json[@"contents"]) {
+        return [self translateVideoListPlaylist:json error:error];
+    }
+
+    NSDictionary *context = [json objectForKey:@"all"];
+    return [self translateCompactPlaylist:json withContext:context error:error];
+}
+
+#pragma mark - Compact Playlist
+
+- (id)translateCompactPlaylist:(NSDictionary *)json 
+                   withContext:(NSDictionary *)context 
+                         error:(NSError **)error {    
+    NSDictionary *data = [TRJSONUtils dictFromJSON:json keyPath:@"i.compactPlaylistRenderer"];
+    
+    if (!data) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"TRPlaylistTranslator" code:2 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Missing playlist data"}];
+        }
+        return nil;
+    }
+
+    NSString *title = [TRJSONUtils stringFromJSON:data keyPath:@"title.runs[0].text"];
+
+    NSString *author = @"";
+    if (context) {
+        author = [TRJSONUtils stringFromJSON:context keyPath:@"header.pageHeaderRenderer.pageTitle"];
+    }
+    
+    NSArray *thumbArray = [TRJSONUtils arrayFromJSON:data keyPath:@"thumbnail.thumbnails"];
+    NSMutableDictionary *thumbnails = [NSMutableDictionary dictionary];
+    for (NSDictionary *thumb in thumbArray) {
+        if (![thumb isKindOfClass:[NSDictionary class]]) continue;
+        
+        NSString *urlString = [thumb objectForKey:@"url"];
+        NSNumber *width = [thumb objectForKey:@"width"];
+        NSNumber *height = [thumb objectForKey:@"height"];
+        
+        if (urlString) {
+            NSURL *url = [NSURL URLWithString:urlString];
+            if (url && width && height) {
+                CGSize size = CGSizeMake([width floatValue], [height floatValue]);
+                NSValue *sizeValue = [NSValue valueWithBytes:&size objCType:@encode(CGSize)];
+                [thumbnails setObject:url forKey:sizeValue];
+            }
+        }
+    }
+    
+    NSString *playlistId = [data objectForKey:@"playlistId"];
+    
+    NSString *countText = [TRJSONUtils stringFromJSON:data keyPath:@"videoCountShortText.runs[0].text"];
+    int videoCount = countText ? [countText intValue] : 0;
+    
+    NSString *bylineText = [TRJSONUtils stringFromJSON:data keyPath:@"shortBylineText.runs[0].text"];
+    BOOL isPrivate = [bylineText isEqualToString:@"Private"];
+    
+    id playlist = nil;
+    if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"] || [version() isEqualToString:@"1.1.0"]) {
+        playlist = [[[NSClassFromString(@"YTPlaylist") alloc] 
+            initWithTitle:title ?: @""
+            summary:@""
+            authorDisplayName:author
+            updated:[NSDate date]
+            thumbnailURLs:thumbnails
+            contentURL:playlistId
+            editURL:playlistId
+            size:videoCount
+            isPrivate:isPrivate
+        ] autorelease];
+    } else {
+        playlist = [[[NSClassFromString(@"YTPlaylist") alloc] 
+            initWithID:playlistId
+            title:title ?: @""
+            summary:@""
+            authorDisplayName:author
+            updated:[NSDate date]
+            thumbnailURLs:thumbnails
+            contentURL:playlistId
+            editURL:playlistId
+            size:videoCount
+            isPrivate:isPrivate
+        ] autorelease];
+    }
+    
+    return playlist;
+}
+
+- (id)translateVideoListPlaylist:(NSDictionary *)json 
+                         error:(NSError **)error {
+    // thankfully none of these seem to be used except for playlist id. thank god.
+    NSDictionary *headerBody = [TRJSONUtils dictFromJSON:json keyPath:@"header.pageHeaderRenderer.content.pageHeaderViewModel"];
+    NSString *playlistId = [TRJSONUtils stringFromJSON:json keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.targetId"]; // other user's playlists
+    if (playlistId == nil)
+        playlistId = [TRJSONUtils stringFromJSON:json keyPath:@"contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.playlistId"]; // the signed in user's playlist
+    NSString *title = [TRJSONUtils stringFromJSON:json keyPath:@"header.pageHeaderRenderer.pageTitle"];
+    NSString *description = [TRJSONUtils stringFromJSON:headerBody keyPath:@"description.descriptionPreviewViewModel.description.content"];
+    NSString *baseVideosCount = [TRJSONUtils stringFromJSON:headerBody keyPath:@"metadata.contentMetadataViewModel.metadataRows[1].metadataParts[2].text.content"];
+    int sizeOfPlaylist = [baseVideosCount integerValue];
+    BOOL isPrivate = [[TRJSONUtils stringFromJSON:headerBody keyPath:@"metadata.contentMetadataViewModel.metadataRows[1].metadataParts[2].text.content"] isEqualToString:@"Private"];
+    NSString *authorDisplayName = [TRJSONUtils stringFromJSON:headerBody keyPath:@"metadata.contentMetadataViewModel.metadataRows[0].metadataParts[0].avatarStack.avatarStackViewModel.text.content"];
+
+    NSArray *thumbArray = [TRJSONUtils arrayFromJSON:headerBody keyPath:@"background.cinematicContainerViewModel.backgroundImageConfig.image.sources"];
+    NSMutableDictionary *thumbnails = [NSMutableDictionary dictionary];
+    for (NSDictionary *thumb in thumbArray) {
+        if (![thumb isKindOfClass:[NSDictionary class]]) continue;
+        
+        NSString *urlString = [thumb objectForKey:@"url"];
+        NSNumber *width = [thumb objectForKey:@"width"];
+        NSNumber *height = [thumb objectForKey:@"height"];
+        
+        if (urlString) {
+            NSURL *url = [NSURL URLWithString:urlString];
+            if (url && width && height) {
+                CGSize size = CGSizeMake([width floatValue], [height floatValue]);
+                NSValue *sizeValue = [NSValue valueWithBytes:&size objCType:@encode(CGSize)];
+                [thumbnails setObject:url forKey:sizeValue];
+            }
+        }
+    }
+
+    id playlist = nil;
+    if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"] || [version() isEqualToString:@"1.1.0"]) {
+        playlist = [[[NSClassFromString(@"YTPlaylist") alloc] 
+            initWithTitle:title
+            summary:description
+            authorDisplayName:authorDisplayName
+            updated:[NSDate date]
+            thumbnailURLs:thumbnails
+            contentURL:playlistId
+            editURL:playlistId
+            size:sizeOfPlaylist
+            isPrivate:isPrivate
+        ] autorelease];
+    } else {
+        playlist = [[[NSClassFromString(@"YTPlaylist") alloc] 
+            initWithID:playlistId
+            title:title
+            summary:description
+            authorDisplayName:authorDisplayName
+            updated:[NSDate date]
+            thumbnailURLs:thumbnails
+            contentURL:playlistId // what the fuck, why does this make it work????
+            editURL:playlistId
+            size:sizeOfPlaylist
+            isPrivate:isPrivate
+        ] autorelease];
+    }
+    
+    return playlist;
+}
+
+- (id)translateCreatedPlaylist:(NSDictionary *)json 
+                         error:(NSError **)error {
+    // thankfully none of these seem to be used except for playlist id. thank god.
+    NSString *playlistId = json[@"playlistId"];
+    id playlist = nil;
+    if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"] || [version() isEqualToString:@"1.1.0"]) {
+        playlist = [[[NSClassFromString(@"YTPlaylist") alloc] 
+            initWithTitle:nil
+            summary:nil
+            authorDisplayName:nil
+            updated:[NSDate date]
+            thumbnailURLs:nil
+            contentURL:playlistId
+            editURL:playlistId
+            size:0
+            isPrivate:NO // i dont know
+        ] autorelease];
+    } else {
+        playlist = [[[NSClassFromString(@"YTPlaylist") alloc] 
+            initWithID:playlistId
+            title:nil
+            summary:nil
+            authorDisplayName:nil
+            updated:[NSDate date]
+            thumbnailURLs:nil
+            contentURL:playlistId
+            editURL:playlistId
+            size:0
+            isPrivate:NO // i don't know
+        ] autorelease];
+    }
+    
+    return playlist;
+}
+
+@end

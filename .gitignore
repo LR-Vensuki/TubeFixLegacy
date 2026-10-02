@@ -1,0 +1,11 @@
+.theos/
+packages/
+.DS_Store
+compile_commands.json
+.cache
+googleapp/signinpolyfil.h
+.clangd
+googleapp/botguard_js.c
+# common/SABR/proto/generated  # now committed pre-generated (protoc 31.1) to avoid protoc-version mismatch
+build/
+xcode/.tfl-*

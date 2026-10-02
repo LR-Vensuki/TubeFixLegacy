@@ -1,0 +1,12 @@
+Package: com.legacyreborn.tubefixlegacy
+Name: TubeFixLegacy
+Version: 1.2.0
+Architecture: iphoneos-arm
+Description: Fixes the Google YouTube app (1.0.0-1.4.0, 2.0.0-2.2.0) and YouTube Classic on iOS 6: feeds, Shorts with a vertical Shorts player, background playback, lock screen controls and double-tap seeking. Based on TubeReplacer by Preloading (GPLv3).
+Maintainer: LegacyReborn Project
+Author: LegacyReborn Project
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), preferenceloader, firmware (>= 5.0), firmware (<< 11.0)
+Conflicts: bag.xml.tuberepair, dev.preloading.tubereplacer
+Replaces: dev.preloading.tubereplacer
+Icon: file:///Library/PreferenceBundles/TubeFixLegacyPrefs.bundle/icon@full.png

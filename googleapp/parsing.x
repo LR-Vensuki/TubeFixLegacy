@@ -1,0 +1,197 @@
+// parsing.x
+// TubeFixLegacy
+//
+// Data format detection and routing (XML vs JSON)
+// Also handles subscription caching for POST requests
+
+#include <Foundation/Foundation.h>
+#include "appheaders.h"
+#include "Translators/TRTranslators.h"
+#include "general.h"
+
+#pragma mark - Format Detection & Parsing
+
+%hook YTTBParser
+
+-(id)parse:(NSData*)rawData error:(NSError **)error {
+    if (!rawData || [rawData length] == 0) {
+        NSLog(@"TubeFixLegacy: Empty data received");
+        return nil;
+    }
+
+    // NSLog(@"rawData -> %@", rawData);
+    
+    const unsigned char* bytes = [rawData bytes];
+    NSUInteger length = [rawData length];
+    NSData *cleanData = rawData;
+
+    NSDictionary *preferences = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.legacyreborn.tubefixlegacy.plist"];
+    if (preferences[@"DebugNetworkRequests"]) {
+        NSString *path = @"/var/mobile/Library/Preferences/tubefixlegacy_network_log.txt";
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+
+        if (![fileManager fileExistsAtPath:path]) {
+            [fileManager createFileAtPath:path contents:nil attributes:nil];
+        }
+        NSMutableData *dataToWrite = [NSMutableData data];
+        [dataToWrite appendData:[@"========Tub3R3p1@c3r_Un1qu3-S3p3r@t0r_!&479(21!#9hfa@a1===============" dataUsingEncoding:NSUTF8StringEncoding]];
+        [dataToWrite appendData:rawData];
+
+        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:path];
+        [fileHandle seekToEndOfFile];
+        [fileHandle writeData:dataToWrite];
+        [fileHandle closeFile];
+    }
+    
+    // Strip Google's anti-XSS prefix: )]}'\\n
+    // This is prepended to JSON responses to prevent JSONP hijacking
+    if (length >= 5 && 
+        bytes[0] == ')' && 
+        bytes[1] == ']' && 
+        bytes[2] == '}' && 
+        bytes[3] == '\'' && 
+        bytes[4] == '\n') {
+        bytes += 5;
+        length -= 5;
+        cleanData = [NSData dataWithBytes:bytes length:length];
+    }
+    
+    // Detect format by first character
+    if (length > 0 && bytes[0] == '<') {
+        // XML format - use legacy TBXML parser
+        NSLog(@"TubeFixLegacy: XML detected, using TBXML");
+        TBXML *xml = [%c(TBXML) tbxmlWithXMLData:cleanData error:error];
+        if ([xml rootXMLElement]) {
+            YTTBXMLElement *rootElement = [[[%c(YTTBXMLElement) alloc] 
+                initWithElement:[xml rootXMLElement]] autorelease];
+            return [self parseElement:rootElement error:error];
+        }
+        return nil;
+    } 
+    else if (length > 0 && bytes[0] == '{') {
+        // JSON format - parse and route to translators
+        NSLog(@"TubeFixLegacy: JSON detected");
+        id json = [NSJSONSerialization 
+            JSONObjectWithData:cleanData 
+            options:NSJSONReadingMutableContainers 
+            error:error];
+        
+        if (!json) {
+            NSLog(@"TubeFixLegacy: JSON parsing failed");
+            return nil;
+        }
+        
+        // Route to parseElement which will use the appropriate translator
+        return [self parseElement:json error:error];
+    } 
+    else {
+        NSLog(@"TubeFixLegacy: Unknown format, first byte: 0x%02X", bytes[0]);
+        return nil;
+    }
+}
+
+%end
+
+#pragma mark - POST Request Caching
+
+%hook YTGDataService
+
+- (void)makePOSTRequest:(YTGDataRequest *)request
+             withParser:(id)parser
+          responseBlock:(id)responseBlock
+             errorBlock:(id)errorBlock {
+    
+    // Wrap the response block to intercept certain responses for caching
+    void (^originalResponseBlock)(id) = [responseBlock copy];
+
+    void (^wrappedResponseBlock)(id) = ^(id response) {
+        // Cache subscriptions when fetching subscription page
+        NSLog(@"parser -> %@", parser);
+        if (parser == [self valueForKey:l(@"subscriptionPageParser")]) {
+            id cache = [self valueForKey:l(@"subscriptionCache")];
+            [cache setValue:@100000 forKey:l(@"countLimit")];
+            [self cacheSubscriptionsFromSubscriptionPage:response];
+        }
+
+        if (parser == [self valueForKey:l(@"channelParser")]) {
+            id cache = [self channelCache];
+            [cache setValue:@100000 forKey:l(@"countLimit")];
+            [self cacheChannel:response];
+        }
+
+        
+
+        if (parser == [self valueForKey:l(@"channelPageParser")]) {
+            id cache = [self channelCache];
+            for (id channel in [response entries]) {
+                [cache setValue:@100000 forKey:l(@"countLimit")];
+                [self cacheChannel:channel];
+            }
+            
+        }
+
+        if (originalResponseBlock) {
+            originalResponseBlock(response);
+        }
+    };
+
+    %orig(request, parser, wrappedResponseBlock, errorBlock);
+    
+    [originalResponseBlock release];
+}
+
+%end
+
+@interface PendingRequestKey
+
+-(id)keyWithRequest:(id)a3 authorizer:(id)a4;
+
+@end
+
+// i hate you youtube for not writing this correctly!!!!
+%hook YTBaseService
+
+-(void)performHTTPRequest:(id)request withAuthorizer:(id)withAuthorizer completionBlock:(id)completionBlock
+{
+    if ([version() isEqualToString:@"1.0.0"] || [version() isEqualToString:@"1.0.1"]) {
+        return %orig;
+    } else {
+        id copiedCompletionBlock = [completionBlock copy];
+
+        NSBlockOperation *operation =
+        [NSBlockOperation blockOperationWithBlock:^{
+
+            id requestKey =
+            [%c(PendingRequestKey) keyWithRequest:request authorizer:withAuthorizer];
+
+            id completionBlock2 = [copiedCompletionBlock autorelease];
+
+            NSMutableArray *v6 =
+            [NSMutableArray arrayWithObject:completionBlock2];
+
+            [[self valueForKey:l(@"pendingRequests")]
+                setObject:v6 forKey:requestKey];
+
+            GTMHTTPFetcher *fetcher =
+            [[self valueForKey:l(@"httpFetcherService")]
+                fetcherWithRequest:request];
+
+            [fetcher setAuthorizer:withAuthorizer];
+
+            [fetcher beginFetchWithCompletionHandler:
+            ^(NSData *data, NSError *error) {
+
+                for (void (^block)(NSData *, NSError *) in v6) {
+                    block(data, error);
+                }
+
+                [(NSMutableDictionary*)
+                [self valueForKey:l(@"pendingRequests")]
+                removeObjectForKey:requestKey];
+            }];
+        }];
+
+        [[NSOperationQueue mainQueue] addOperation:operation];
+    }
+}
+%end

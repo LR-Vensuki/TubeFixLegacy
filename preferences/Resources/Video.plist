@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>HQ streams can play every video, including private ones (web). 360p (Android) is lighter for old devices. In a custom URL, %v is replaced with the video ID.</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>default</key>
+			<string>web</string>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>detail</key>
+			<string>PSListItemsController</string>
+			<key>key</key>
+			<string>StreamType</string>
+			<key>label</key>
+			<string>Stream</string>
+			<key>validTitles</key>
+			<array>
+				<string>HQ (web)</string>
+				<string>HQ (mobile web)</string>
+				<string>360p (Android)</string>
+				<string>TubeRepair server (kevinf100)</string>
+				<string>Custom URL</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<string>web</string>
+				<string>mweb</string>
+				<string>android</string>
+				<string>tuberepair</string>
+				<string>custom</string>
+			</array>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>autoCaps</key>
+			<string>none</string>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>CustomStreamURL</string>
+			<key>keyboard</key>
+			<string>URL</string>
+			<key>label</key>
+			<string>Custom URL</string>
+			<key>noAutoCorrect</key>
+			<true/>
+			<key>placeholder</key>
+			<string>https://tuberepair.uptimetrackers.com/getvideo/%v</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Quality</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>YTRPQualitySelectorListController</string>
+			<key>isController</key>
+			<true/>
+			<key>label</key>
+			<string>Allowed Qualities</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>AllowSABR</string>
+			<key>label</key>
+			<string>SABR Streams</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.legacyreborn.tubefixlegacy/settingschanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.legacyreborn.tubefixlegacy</string>
+			<key>key</key>
+			<string>AllowHLS</string>
+			<key>label</key>
+			<string>HLS Streams</string>
+		</dict>
+	</array>
+	<key>title</key>
+	<string>Video Quality</string>
+</dict>
+</plist>
